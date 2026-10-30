@@ -1,135 +1,111 @@
-#!/usr/bin/env python3
-"""Package the original Alafasy v1.0.0 MP3 and ayah-timing ZIP archives.
-
-Requires Python 3.10+ and ffprobe (provided by ffmpeg).
-It does not alter, replace or estimate audio/timing data. On validation failure,
-GitHub Actions must not upload anything from the prepared output.
-"""
-
-import argparse
-import json
-import math
-import re
-import shutil
-import subprocess
-import sys
-import unicodedata
-import zipfile
-from pathlib import Path
-
-VERSION = 'ARABIC_FILENAME_FIX_V3_2026_10_31'
-EXPECTED_AYAH_TOTAL = 6236  # Hafs convention (114 surahs)
-
-
-def normalize_digits(s: str) -> str:
-    """Translate Arabic-Indic/extended Arabic-Indic numerals, preserving filenames."""
-    result = []
-    for ch in s:
-        try:
-            result.append(str(unicodedata.decimal(ch)))
-        except ValueError:
-            result.append(ch)
-    return ''.join(result)
-
-
-def surah_number(filename: str, suffix: str):
-    """Match 001.mp3, 088الغاشية.mp3, 037  RTL_الصافات.mp3 and timings-001.json.
-
-    The archive's Arabic names may be displayed as CP437 mojibake by ZIP tools;
-    the leading ASCII digits remain unchanged and are all we need.
-    """
-    basename = filename.replace('\\', '/').rsplit('/', 1)[-1]
-    if not basename.lower().endswith(suffix):
-        return None
-    stem = normalize_digits(basename[:-len(suffix)]).lstrip('\ufeff\u200e\u200f\u061c').strip()
-
-    # Never extract the first three digits from a longer number.
-    patterns = (
-        r'^0*([0-9]{1,3})(?![0-9])',
-        r'^(?:surah|sura|سورة|سوره)[\s._\-–]*0*([0-9]{1,3})(?![0-9])',
-        r'^(?:timings?|ayahs?|verses?)[\s._\-–]*0*([0-9]{1,3})(?![0-9])',
-    )
-    for pattern in patterns:
-        match = re.match(pattern, stem, flags=re.IGNORECASE)
-        if match:
-            number = int(match.group(1))
-            return number if 1 <= number <= 114 else None
-    return None
-
-
-def is_macos_metadata(filename: str) -> bool:
-    parts = filename.replace('\\', '/').split('/')
-    return '__MACOSX' in parts or parts[-1].startswith('._') or parts[-1] == '.DS_Store'
-
-
-def map_members(archive: zipfile.ZipFile, suffix: str, expected: int):
-    mapped = {}
-    unknown = []
-    skipped_metadata = 0
-    for member in archive.infolist():
-        if member.is_dir() or not member.filename.lower().endswith(suffix):
-            continue
-        if is_macos_metadata(member.filename):
-            skipped_metadata += 1
-            continue
-        number = surah_number(member.filename, suffix)
-        if number is None:
-            unknown.append(member.filename)
-            continue
-        if number in mapped:
-            raise ValueError(
-                f'Duplicate surah {number:03d} in {suffix}: '
-                f'{mapped[number].filename!r} and {member.filename!r}'
-            )
-        mapped[number] = member
-
-    required = set(range(1, expected + 1))
-    missing = sorted(required - mapped.keys())
-    outside_range = sorted(mapped.keys() - required)
-    if missing or outside_range or unknown:
-        raise ValueError(
-            f'{suffix} archive incomplete or unexpectedly named: '
-            f'missing={missing}, unexpected_numbers={outside_range}, '
-            f'unrecognized_count={len(unknown)}, examples={unknown[:8]}'
-        )
-    print(f'OK: {len(mapped)} {suffix} files; skipped {skipped_metadata} macOS metadata entries', flush=True)
-    return mapped
-
-
-def timing_scale(payload) -> int:
-    unit = ('ms' if not isinstance(payload, dict) else
-            str(payload.get('time_unit') or payload.get('unit') or 'ms').lower().strip())
-    if unit in {'ms', 'millisecond', 'milliseconds', 'msec'}:
-        return 1
-    if unit in {'s', 'sec', 'second', 'seconds'}:
-        return 1000
-    raise ValueError(f'Unknown timing unit {unit!r}; refusing to guess')
-
-
-def normalize_timing_rows(payload, surah: int):
-    scale = timing_scale(payload)
-    if isinstance(payload, list):
-        rows = payload
-    elif isinstance(payload, dict):
-        declared = payload.get('surah')
-        if declared is not None and int(declared) != surah:
-            raise ValueError(f'Surah {surah}: JSON declares a different surah: {declared}')
-        rows = next((payload[key] for key in ('ayahs', 'ayat_timing', 'timings', 'data')
-                     if isinstance(payload.get(key), list)), None)
-    else:
-        rows = None
-    if not rows or not isinstance(rows, list):
-        raise ValueError(f'Surah {surah}: expected nonempty ayah timing list')
-
-    result = []
-    previous_start = -1
-    for index, row in enumerate(rows, 1):
-        if not isinstance(row, dict):
-            raise ValueError(f'Surah {surah}, row {index}: expected JSON object')
-        ayah = row.get('ayah', row.get('number', row.get('verse')))
-        start = row.get('start_time', row.get('start'))
-        end = row.get('end_time', row.get('end'))
-        if ayah is None or start is None or end is None:
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+207
+208
+209
+210
+211
+212
+213
+214
+215
+216
+217
+218
+219
+220
+221
+222
+223
+224
+225
+226
+227
+228
+229
+230
+231
+232
+233
+234
+235
+236
+237
+238
+239
+240
+241
+242
+243
+244
+245
+246
+247
+248
+249
+250
+251
+252
+253
+254
+255
+256
+257
+258
+259
+260
+261
+262
+263
+264
+265
+266
+267
+268
             raise ValueError(f'Surah {surah}, row {index}: missing ayah/start/end')
         try:
             ayah = int(ayah)
@@ -182,7 +158,7 @@ def main():
 
     with zipfile.ZipFile(args.audio) as a, zipfile.ZipFile(args.timings) as t:
         mp3 = map_members(a, '.mp3', args.expected)
-        js = map_members(t, '.json', args.expected)
+        js = map_members(t, '.json', args.expected, canonical_folder='mp3quran-format')
         for surah in range(1, args.expected + 1):
             n = f'{surah:03d}'
             destination = audio_dir / f'{n}.mp3'
