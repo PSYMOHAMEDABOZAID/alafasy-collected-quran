@@ -1,215 +1,192 @@
-161
-162
-163
-164
-165
-166
-167
-168
-169
-170
-171
-172
-173
-174
-175
-176
-177
-178
-179
-180
-181
-182
-183
-184
-185
-186
-187
-188
-189
-190
-191
-192
-193
-194
-195
-196
-197
-198
-199
-200
-201
-202
-203
-204
-205
-206
-207
-208
-209
-210
-211
-212
-213
-214
-215
-216
-217
-218
-219
-220
-221
-222
-223
-224
-225
-226
-227
-228
-229
-230
-231
-232
-233
-234
-235
-236
-237
-238
-239
-240
-241
-242
-243
-244
-245
-246
-247
-248
-249
-250
-251
-252
-253
-254
-255
-256
-257
-258
-259
-260
-261
-262
-263
-264
-265
-266
-267
-268
-            raise ValueError(f'Surah {surah}, row {index}: missing ayah/start/end')
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+#!/usr/bin/env python3
+"""Package the original Alafasy v1.0.0 MP3 and ayah-timing ZIP archives.
+
+Requires Python 3.10+ and ffprobe (provided by ffmpeg).
+It does not alter, replace or estimate audio/timing data. On validation failure,
+GitHub Actions must not upload anything from the prepared output.
+"""
+
+import argparse
+import json
+import math
+import re
+import shutil
+import subprocess
+import sys
+import unicodedata
+import zipfile
+from pathlib import Path
+
+VERSION = 'SYNTAX_AND_TIMINGS_VERIFIED_V5_2026_10_31'
+EXPECTED_AYAH_TOTAL = 6236  # Hafs convention (114 surahs)
+
+
+def normalize_digits(s: str) -> str:
+    """Translate Arabic-Indic/extended Arabic-Indic numerals, preserving filenames."""
+    result = []
+    for ch in s:
         try:
-            ayah = int(ayah)
-            start_ms = float(start) * scale
-            end_ms = float(end) * scale
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f'Surah {surah}, row {index}: invalid number') from exc
-        if (ayah != index or not math.isfinite(start_ms) or not math.isfinite(end_ms)
-                or start_ms < 0 or start_ms < previous_start or end_ms <= start_ms):
-            raise ValueError(f'Surah {surah}, ayah {index}: timings not sequential/positive')
-        result.append({'ayah': index, 'start_time': round(start_ms), 'end_time': round(end_ms)})
-        previous_start = start_ms
-    return result
+            result.append(str(unicodedata.decimal(ch)))
+        except ValueError:
+            result.append(ch)
+    return ''.join(result)
 
 
-def duration_seconds(mp3_path: Path) -> float:
-    res = subprocess.run(
-        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-         '-of', 'default=noprint_wrappers=1:nokey=1', str(mp3_path)],
-        capture_output=True, text=True, check=False
+def surah_number(filename: str, suffix: str):
+    """Match 001.mp3, 088الغاشية.mp3, 037  RTL_الصافات.mp3 and timings-001.json.
+
+    The archive's Arabic names may be displayed as CP437 mojibake by ZIP tools;
+    the leading ASCII digits remain unchanged and are all we need.
+    """
+    basename = filename.replace('\\', '/').rsplit('/', 1)[-1]
+    if not basename.lower().endswith(suffix):
+        return None
+    stem = normalize_digits(basename[:-len(suffix)]).lstrip('\ufeff\u200e\u200f\u061c').strip()
+
+    # Never extract the first three digits from a longer number.
+    patterns = (
+        r'^0*([0-9]{1,3})(?![0-9])',
+        r'^(?:surah|sura|سورة|سوره)[\s._\-–]*0*([0-9]{1,3})(?![0-9])',
+        r'^(?:timings?|ayahs?|verses?)[\s._\-–]*0*([0-9]{1,3})(?![0-9])',
     )
-    if res.returncode != 0:
-        raise ValueError(f'{mp3_path.name}: ffprobe failed: {res.stderr[:200]}')
-    try:
-        duration = float(res.stdout.strip())
-    except ValueError as exc:
-        raise ValueError(f'{mp3_path.name}: no readable MP3 duration') from exc
-    if not math.isfinite(duration) or duration <= 1:
-        raise ValueError(f'{mp3_path.name}: bad audio duration {duration}')
-    return duration
+    for pattern in patterns:
+        match = re.match(pattern, stem, flags=re.IGNORECASE)
+        if match:
+            number = int(match.group(1))
+            return number if 1 <= number <= 114 else None
+    return None
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--audio', type=Path, required=True)
-    parser.add_argument('--timings', type=Path, required=True)
-    parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--expected', type=int, default=114)
-    args = parser.parse_args()
-    if not 1 <= args.expected <= 114:
-        parser.error('--expected must be 1..114')
-
-    print(f'PREPARER_VERSION={VERSION}', flush=True)
-    audio_dir = args.out / 'audio'
-    timing_dir = args.out / 'timings'
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    timing_dir.mkdir(parents=True, exist_ok=True)
-    manifest = []
-    total_ayahs = 0
-
-    with zipfile.ZipFile(args.audio) as a, zipfile.ZipFile(args.timings) as t:
-        mp3 = map_members(a, '.mp3', args.expected)
-        js = map_members(t, '.json', args.expected, canonical_folder='mp3quran-format')
-        for surah in range(1, args.expected + 1):
-            n = f'{surah:03d}'
-            destination = audio_dir / f'{n}.mp3'
-            with a.open(mp3[surah]) as incoming, destination.open('wb') as outgoing:
-                shutil.copyfileobj(incoming, outgoing, 1024 * 1024)
-            if destination.stat().st_size < 10000:
-                raise ValueError(f'{n}.mp3 appears truncated (<10KB)')
-
-            with t.open(js[surah]) as raw:
-                data = json.load(raw)
-            ayahs = normalize_timing_rows(data, surah)
-            duration = duration_seconds(destination)
-            last_end = ayahs[-1]['end_time'] / 1000.0
-            if last_end > duration + 3:
-                raise ValueError(
-                    f'Surah {n}: timing goes to {last_end:.2f}s '
-                    f'but the original MP3 duration is {duration:.2f}s'
-                )
-            (timing_dir / f'timings-{n}.json').write_text(
-                json.dumps(ayahs, ensure_ascii=False, separators=(',', ':')), encoding='utf-8'
-            )
-            total_ayahs += len(ayahs)
-            manifest.append({
-                'surah': surah, 'ayahs': len(ayahs),
-                'seconds': round(duration, 3),
-                'last_timing_seconds': round(last_end, 3),
-                'bytes': destination.stat().st_size,
-            })
-            print(f'Surah {n}: {len(ayahs)} ayahs, {duration:.1f}s MP3, {last_end:.1f}s timing', flush=True)
-
-    if args.expected == 114 and total_ayahs != EXPECTED_AYAH_TOTAL:
-        raise ValueError(f'Timing rows total {total_ayahs}, expected {EXPECTED_AYAH_TOTAL}')
-    (args.out / 'collected-manifest.json').write_text(
-        json.dumps({
-            'recording': 'Mishary Alafasy - collected Quran',
-            'source_release': 'v1.0.0',
-            'preparer_version': VERSION,
-            'source_audio_archive': args.audio.name,
-            'source_timing_archive': args.timings.name,
-            'total_ayahs': total_ayahs,
-            'surahs': manifest,
-            'note': 'Validation of file structure/duration, not independent auditory verification of verse alignment',
-        }, ensure_ascii=False, indent=2),
-        encoding='utf-8',
-    )
-    print(f'PASS {VERSION}: {args.expected} MP3 and timing files, {total_ayahs} verses', flush=True)
+def is_macos_metadata(filename: str) -> bool:
+    parts = filename.replace('\\', '/').split('/')
+    return '__MACOSX' in parts or parts[-1].startswith('._') or parts[-1] == '.DS_Store'
 
 
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception as error:
-        print(f'FAILED [{VERSION}] — nothing should be uploaded: {error}', file=sys.stderr)
-        sys.exit(1)
+def map_members(archive: zipfile.ZipFile, suffix: str, expected: int,
+                canonical_folder=None):
+    """Choose ONE authoritative directory (when provided), rejecting actual duplicates.
+
+    The original timing ZIP holds historical alternatives in
+    history/original-repeat-candidates/ alongside the intended
+    mp3quran-format/ timing files. Those are NOT interchangeable.
+    Canonical timing files are selected by their directory path,
+    not by their order in the ZIP. Other folders are never mixed in.
+    """
+    mapped = {}
+    unknown = []
+    skipped_metadata = 0
+    skipped_other_directories = 0
+    for member in archive.infolist():
+        if member.is_dir() or not member.filename.lower().endswith(suffix):
+            continue
+        if is_macos_metadata(member.filename):
+            skipped_metadata += 1
+            continue
+        path_parts = member.filename.replace('\\', '/').split('/')
+        directory_parts = [part.casefold() for part in path_parts[:-1]]
+        if canonical_folder is not None and canonical_folder.casefold() not in directory_parts:
+            skipped_other_directories += 1
+            continue
+        number = surah_number(member.filename, suffix)
+        if number is None:
+            unknown.append(member.filename)
+            continue
+        if number in mapped:
+            raise ValueError(
+                f'Duplicate surah {number:03d} within the selected {suffix} files: '
