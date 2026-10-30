@@ -18,11 +18,26 @@ from pathlib import Path
 
 
 def numbered(stem):
-    # Fail closed: number must be leading or prefixed by explicit 'surah' label.
-    latin = stem.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
-    for pattern in (r'^0*(\d{1,3})(?=$|[\s._\-–])',
-                    r'^(?:surah|sura|سورة)[\s_\-–]*0*(\d{1,3})(?=$|[\s._\-–])'):
-        match = re.search(pattern, latin, re.I)
+    """Identify the surah number from its filename, without trusting its Arabic text.
+
+    The real archive contains e.g. ``088الغاشيه.mp3`` and
+    ``037  \u200f_الصافات.mp3``.  The number is *not* always separated from
+    the Arabic name by whitespace/underscore. ZIP's legacy filename encoding
+    can also display Arabic as mojibake, but the ASCII numeric prefix survives.
+    Never interpret a four-digit number as a shorter surah number.
+    """
+    latin = stem.translate(str.maketrans(
+        '٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹',
+        '01234567890123456789',
+    ))
+    latin = latin.lstrip('\ufeff\u200e\u200f\u061c').strip()
+    # The name may be 001.mp3, 001_الفاتحة.mp3 or 001الفاتحة.mp3.
+    # Stop only at another digit; Arabic/Latin letters are legitimate suffixes.
+    for pattern in (
+        r'^([0-9]{1,3})(?![0-9])',
+        r'^(?:surah|sura|سورة)[\s._\-–]*([0-9]{1,3})(?![0-9])',
+    ):
+        match = re.match(pattern, latin, re.IGNORECASE)
         if match:
             number = int(match.group(1))
             if 1 <= number <= 114:
@@ -33,23 +48,40 @@ def numbered(stem):
 def numbered_members(archive, suffix, expected):
     mapped = {}
     ignored = []
+    skipped_macos = 0
     for entry in archive.infolist():
         if entry.is_dir() or not entry.filename.lower().endswith(suffix):
             continue
-        name = Path(entry.filename).stem
-        number = numbered(name)
+        # macOS adds AppleDouble resource forks (._*) in __MACOSX. They are
+        # not genuine recordings, and often have the same numeric prefix.
+        path_parts = entry.filename.replace('\\', '/').split('/')
+        base_name = path_parts[-1]
+        if '__MACOSX' in path_parts or base_name.startswith('._'):
+            skipped_macos += 1
+            continue
+        number = numbered(Path(base_name).stem)
         if number is None:
             ignored.append(entry.filename)
             continue
         if number in mapped:
-            raise ValueError(f'Duplicate surah {number}: {entry.filename} and {mapped[number].filename}')
+            raise ValueError(
+                f'Duplicate surah {number}: {entry.filename} and {mapped[number].filename}'
+            )
         mapped[number] = entry
     needed = set(range(1, expected + 1))
     missing = sorted(needed - set(mapped))
     extras = sorted(set(mapped) - needed)
-    if missing or extras:
-        raise ValueError(f'{suffix} ZIP mismatches: missing={missing}, extras={extras}; unrecognized={ignored[:15]}')
-    print(f'Found {len(mapped)} distinct {suffix} files.')
+    if missing or extras or ignored:
+        raise ValueError(
+            f'{suffix} ZIP mismatches: missing={missing}, extras={extras}; '
+            f'unrecognized real files={ignored[:20]} '
+            f'(count={len(ignored)}); ignored AppleDouble files={skipped_macos}'
+        )
+    print(
+        f'Found {len(mapped)} distinct {suffix} files; '
+        f'ignored {skipped_macos} harmless macOS metadata entries.',
+        flush=True,
+    )
     return mapped
 
 
