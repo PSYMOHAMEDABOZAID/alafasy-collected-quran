@@ -1,0 +1,27 @@
+name: Check developer release assets
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'DEVELOPERS.md'
+      - 'developers/**'
+      - '.github/workflows/check-developer-assets.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python syntax and offline tests
+        run: |
+          python -m py_compile developers/scripts/check_release.py developers/scripts/test_check_release.py
+          python -m unittest discover -s developers/scripts -p 'test_*.py' -v
+      - name: Check actual release and timing samples
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python developers/scripts/check_release.py --sample-json
