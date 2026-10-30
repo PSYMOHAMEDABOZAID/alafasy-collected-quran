@@ -1,99 +1,3 @@
-1
-2
-3
-4
-5
-6
-7
-8
-9
-10
-11
-12
-13
-14
-15
-16
-17
-18
-19
-20
-21
-22
-23
-24
-25
-26
-27
-28
-29
-30
-31
-32
-33
-34
-35
-36
-37
-38
-39
-40
-41
-42
-43
-44
-45
-46
-47
-48
-49
-50
-51
-52
-53
-54
-55
-56
-57
-58
-59
-60
-61
-62
-63
-64
-65
-66
-67
-68
-69
-70
-71
-72
-73
-74
-75
-76
-77
-78
-79
-80
-81
-82
-83
-84
-85
-86
-87
-88
-89
-90
-91
-92
-93
-94
-95
-96
 #!/usr/bin/env python3
 """Split the ORIGINAL released ZIPs into 114 streamable MP3s and matched JSON files.
 
@@ -190,3 +94,83 @@ def parse_rows(payload, surah):
         except (ValueError, TypeError):
             raise ValueError(f'Surah {surah}: non-numeric timing on row {index}') from None
         if ayah_num != index or not (math.isfinite(start_ms) and math.isfinite(end_ms)) or \
+           start_ms < 0 or start_ms < prev_start or end_ms <= start_ms:
+            raise ValueError(f'Surah {surah}: invalid order or time at ayah {ayah_num}')
+        result.append(dict(ayah=ayah_num, start_time=round(start_ms), end_time=round(end_ms)))
+        prev_start = start_ms
+    return result
+
+
+def duration_in_seconds(path):
+    process = subprocess.run([
+        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', str(path),
+    ], capture_output=True, text=True)
+    if process.returncode:
+        raise RuntimeError(f'ffprobe failed on {path.name}: {process.stderr[:250]}')
+    duration = float(process.stdout.strip())
+    if not math.isfinite(duration) or duration < 1:
+        raise ValueError(f'Invalid MP3 duration: {path.name}')
+    return duration
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--audio', type=Path, required=True)
+    parser.add_argument('--timings', type=Path, required=True)
+    parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--expected', type=int, default=114)
+    args = parser.parse_args()
+    if not 1 <= args.expected <= 114:
+        parser.error('--expected must be in range 1..114')
+    audio_out = args.out / 'audio'
+    timing_out = args.out / 'timings'
+    audio_out.mkdir(parents=True, exist_ok=True)
+    timing_out.mkdir(parents=True, exist_ok=True)
+    total_ayahs = 0
+    manifest = []
+    with zipfile.ZipFile(args.audio) as audio_zip, zipfile.ZipFile(args.timings) as timing_zip:
+        mp3s = numbered_members(audio_zip, '.mp3', args.expected)
+        jsons = numbered_members(timing_zip, '.json', args.expected)
+        for surah in range(1, args.expected + 1):
+            key = f'{surah:03d}'
+            audio_dest = audio_out / f'{key}.mp3'
+            with audio_zip.open(mp3s[surah]) as reader, audio_dest.open('wb') as writer:
+                shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            if audio_dest.stat().st_size < 10000:
+                raise ValueError(f'Surah {surah}: suspiciously small audio')
+            with timing_zip.open(jsons[surah]) as reader:
+                payload = json.load(reader)
+            rows = parse_rows(payload, surah)
+            duration = duration_in_seconds(audio_dest)
+            final_end = rows[-1]['end_time'] / 1000
+            if final_end > duration + 3:
+                raise ValueError(f'Surah {surah}: timing ends at {final_end:.1f}s but audio lasts {duration:.1f}s')
+            # Do not require final_end == duration; recitation files can contain a closing tail.
+            (timing_out / f'timings-{key}.json').write_text(
+                json.dumps(rows, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+            total_ayahs += len(rows)
+            manifest.append({'surah': surah, 'ayahs': len(rows), 'seconds': round(duration, 3),
+                             'last_timing_seconds': round(final_end, 3),
+                             'bytes': audio_dest.stat().st_size})
+            print(f'{surah:03d}/{args.expected}: {len(rows)} ayahs; audio {duration:.1f}s; last timing {final_end:.1f}s', flush=True)
+    if args.expected == 114 and total_ayahs != 6236:
+        raise ValueError(f'All timing rows total {total_ayahs}, expected 6236 for Hafs. Refusing publish.')
+    (args.out / 'collected-manifest.json').write_text(json.dumps({
+        'recording': 'Mishary Alafasy collected',
+        'source_release': 'v1.0.0',
+        'source_audio_archive': args.audio.name,
+        'source_timing_archive': args.timings.name,
+        'total_ayahs': total_ayahs,
+        'surahs': manifest,
+        'note': 'Structure and duration checks only; verse alignment is not aurally certified.',
+    }, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f'PASS: {args.expected} chapter audio files and {total_ayahs} timing rows. Ready for upload.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(f'FAILED — nothing should be uploaded: {exc}', file=sys.stderr)
+        sys.exit(1)
