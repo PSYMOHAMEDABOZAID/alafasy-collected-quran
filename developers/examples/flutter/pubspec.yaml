@@ -1,0 +1,13 @@
+name: alafasy_collected_demo
+description: Collected Alafasy recitation - independent minimal demo
+publish_to: none
+version: 1.0.0+1
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  just_audio: ^0.9.42
+  http: ^1.2.2
+flutter:
+  uses-material-design: true
